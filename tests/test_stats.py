@@ -4,6 +4,7 @@ Runs a handful of messages through decider.decide() against a temporary memory
 store and a fake API client, then checks the rendered card.
 """
 
+import json
 import os
 import sys
 import tempfile
@@ -29,16 +30,28 @@ class _Resp:
 
 
 class FakeClient:
-    def __init__(self, answer_text, conflict_text):
-        self.answer_text = answer_text
-        self.conflict_text = conflict_text
+    """Emits the strict JSON the decider expects.
+
+    `answer` is a reply string (None -> {"answerable": false}); `conflict` is a
+    callout line (None -> {"conflict": false}).
+    """
+
+    def __init__(self, answer=None, conflict=None):
+        self.answer = answer
+        self.conflict = conflict
         outer = self
 
         class _Messages:
             def create(self, *, system, messages, **kwargs):
                 if "conflicts with a decision" in system:
-                    return _Resp(outer.conflict_text)
-                return _Resp(outer.answer_text)
+                    if outer.conflict is None:
+                        return _Resp('{"conflict": false}')
+                    return _Resp(json.dumps(
+                        {"conflict": True, "line": outer.conflict}))
+                if outer.answer is None:
+                    return _Resp('{"answerable": false}')
+                return _Resp(json.dumps(
+                    {"answerable": True, "reply": outer.answer}))
 
         self.messages = _Messages()
 
@@ -56,8 +69,8 @@ def test_stats_card():
     mem.add_item("decision", "group", "meet at Hayden Thursday at 6", None, mid)
 
     client = FakeClient(
-        answer_text="We're meeting Thursday at 6 at Hayden.",
-        conflict_text="heads up - you'd set Thursday at 6, this says 7.",
+        answer="We're meeting Thursday at 6 at Hayden.",
+        conflict="heads up - you'd set Thursday at 6, this says 7.",
     )
 
     # Five messages: quiet, answer, answer, conflict, quiet.
@@ -111,7 +124,7 @@ def test_followup_logged_but_not_scored():
 
     # One chatter message establishes a baseline: 1 seen, 0 replied, 100%.
     decider.decide("lol anyway", "sam", NOW, mem, mentioned=False,
-                   channel=CH, client=FakeClient("NONE", "NONE"))
+                   channel=CH, client=FakeClient())
     before = mem.get_seen_replied()
     score_before = mem.get_silence_score()
     assert before == {"seen": 1, "replied": 0} and score_before == 100.0, before
@@ -130,9 +143,43 @@ def test_followup_logged_but_not_scored():
     assert "replies sent: 0" in card, card
     assert "silence score: 100%" in card, card
     assert "follow ups sent (not counted in the score): 1" in card, card
-    # The follow-up shows up in the recent-decisions list.
-    assert "  spoke - promise past due" in card, card
-    print("  follow-up logged and shown, score unaffected OK")
+    # The follow-up is NOT in the recent-decisions list (that list is for
+    # message-driven decisions only); it lives on the counter line instead.
+    assert "promise past due" not in card.split("last 5 decisions:")[1], card
+    decision_lines = [ln for ln in card.splitlines()
+                      if ln.startswith("  spoke") or ln.startswith("  quiet")]
+    assert decision_lines == ["  quiet - chatter / side conversation"], \
+        decision_lines
+    print("  follow-up counted but kept out of recent decisions OK")
+
+
+def test_recent_list_skips_followups_to_find_messages():
+    """With follow-ups interleaved, the list still shows 5 message decisions."""
+    mem = _fresh_memory()
+    # 6 message decisions with a couple of follow-ups mixed in between.
+    mem.log_decision(CH, "m1", False, "none", "chatter / side conversation")
+    mem.log_decision(CH, "m2", True, "answer", "directly addressed")
+    mem.log_decision(CH, "f1", True, "followup", "promise past due")
+    mem.log_decision(CH, "m3", False, "none", "chatter / side conversation")
+    mem.log_decision(CH, "m4", True, "conflict", "contradicts an open decision")
+    mem.log_decision(CH, "f2", True, "followup", "promise past due")
+    mem.log_decision(CH, "m5", False, "none", "question, but memory has no answer")
+    mem.log_decision(CH, "m6", True, "answer", "directly addressed")
+
+    card = stats.format_stats(mem, CH)
+    body = card.split("last 5 decisions:")[1]
+    assert "promise past due" not in body, body
+    lines = [ln for ln in body.splitlines()
+             if ln.startswith("  spoke") or ln.startswith("  quiet")]
+    # The 5 newest message decisions (m6..m2), newest first.
+    assert lines == [
+        "  spoke - directly addressed",                 # m6
+        "  quiet - question, but memory has no answer",  # m5
+        "  spoke - contradicts an open decision",        # m4
+        "  quiet - chatter / side conversation",         # m3
+        "  spoke - directly addressed",                  # m2
+    ], lines
+    print("  recent list skips follow-ups to show 5 message decisions OK")
 
 
 def test_empty_card():
@@ -161,6 +208,7 @@ def main():
     for name, fn in [
         ("stats card", test_stats_card),
         ("follow-up logged but not scored", test_followup_logged_but_not_scored),
+        ("recent list skips follow-ups", test_recent_list_skips_followups_to_find_messages),
         ("empty card", test_empty_card),
         ("message truncation", test_message_text_truncated_to_120),
     ]:

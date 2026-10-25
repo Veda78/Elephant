@@ -72,7 +72,57 @@ def main():
     print("get_silence_score      OK  ->", f"{score:.1f}%")
 
     store.close()
+
+    _test_dedup()
+
     print("\nAll tests passed.")
+
+
+def _test_dedup():
+    """add_item_if_new skips near-duplicate open promises and decisions."""
+    store = MemoryStore(os.path.join(tempfile.mkdtemp(), "dedup.db"))
+    mid = store.add_message("general", "priya", "I'll push the writeup")
+
+    # First promise is created.
+    id1, created1 = store.add_item_if_new(
+        "promise", "priya", "push the writeup", 1000.0, mid, "general")
+    assert created1 is True, "first promise should be created"
+
+    # A near-duplicate from the same person (extra words, different due) is
+    # skipped and maps back to the first item's id.
+    id2, created2 = store.add_item_if_new(
+        "promise", "priya", "push my part of the writeup", 9999.0, mid, "general")
+    assert created2 is False, "similar promise should be skipped"
+    assert id2 == id1, "duplicate maps to the existing item"
+
+    # Same text but a DIFFERENT person is not a duplicate.
+    id3, created3 = store.add_item_if_new(
+        "promise", "jordan", "push the writeup", 1000.0, mid, "general")
+    assert created3 is True, "different person is a separate promise"
+
+    # A genuinely different promise from priya is kept.
+    id4, created4 = store.add_item_if_new(
+        "promise", "priya", "book the study room", 1000.0, mid, "general")
+    assert created4 is True, "different task is a separate promise"
+
+    assert len(store.get_open_items("general")) == 3, store.get_open_items("general")
+    print("add_item_if_new (promise)  OK  -> 1 kept, 1 skipped, 2 distinct")
+
+    # Decisions: similar "what" is a duplicate (who is ignored).
+    d1, c1 = store.add_item_if_new(
+        "decision", "group", "go out on mill ave", None, mid, "general")
+    d2, c2 = store.add_item_if_new(
+        "decision", "group", "go out on mill ave saturday", None, mid, "general")
+    assert c1 is True and c2 is False, (c1, c2)
+    assert d2 == d1, "duplicate decision maps to existing"
+    d3, c3 = store.add_item_if_new(
+        "decision", "group", "use overleaf for the report", None, mid, "general")
+    assert c3 is True, "different decision is kept"
+    decisions = [it for it in store.get_open_items("general")
+                 if it["kind"] == "decision"]
+    assert len(decisions) == 2, decisions
+    print("add_item_if_new (decision) OK  -> 1 kept, 1 skipped, 1 distinct")
+    store.close()
 
 
 if __name__ == "__main__":

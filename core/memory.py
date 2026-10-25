@@ -4,8 +4,32 @@ Uses only the Python standard library (sqlite3). A single MemoryStore owns one
 database file and creates its schema on construction.
 """
 
+import re
 import sqlite3
 import time
+
+# Short, common words ignored when comparing two items' "what" text.
+_STOPWORDS = {
+    "the", "a", "an", "and", "or", "to", "for", "of", "my", "our", "your",
+    "his", "her", "their", "that", "this", "it", "part", "some", "please",
+    "will", "can", "i", "we", "up", "on", "in", "at", "by", "so", "with",
+}
+
+
+def _key_words(text):
+    """Significant lowercase words in `text`, for similarity comparison."""
+    return {w for w in re.findall(r"[a-z0-9]+", (text or "").lower())
+            if w not in _STOPWORDS and len(w) > 1}
+
+
+def _similar_what(a, b):
+    """True when two "what" strings describe very nearly the same thing."""
+    ka, kb = _key_words(a), _key_words(b)
+    if not ka or not kb:
+        # Nothing significant to compare on -> fall back to exact text match.
+        return (a or "").strip().lower() == (b or "").strip().lower()
+    # Same key words, or one set's key words are all contained in the other.
+    return ka == kb or ka <= kb or kb <= ka
 
 
 class MemoryStore:
@@ -96,6 +120,34 @@ class MemoryStore:
         )
         self.conn.commit()
         return cur.lastrowid
+
+    def find_similar_open_item(self, kind, who, what, channel):
+        """Return an existing open item that duplicates this one, or None.
+
+        A promise duplicates when the same person already has an open promise
+        with a very similar "what" (same key words), regardless of due time.
+        A decision duplicates when an open decision has a very similar "what"
+        (the owner is usually "group", so who is ignored for decisions).
+        """
+        for it in self.get_open_items(channel):
+            if it["kind"] != kind:
+                continue
+            if kind == "promise" and it["who"].lower() != (who or "").lower():
+                continue
+            if _similar_what(what, it["what"]):
+                return it
+        return None
+
+    def add_item_if_new(self, kind, who, what, due, source_message_id, channel):
+        """Add an item unless a similar open one exists. Return (id, created).
+
+        When a duplicate is found, nothing is inserted and the existing item's
+        id is returned with created=False.
+        """
+        existing = self.find_similar_open_item(kind, who, what, channel)
+        if existing is not None:
+            return existing["id"], False
+        return self.add_item(kind, who, what, due, source_message_id), True
 
     def get_open_items(self, channel):
         """Return all open items whose source message is in the channel."""

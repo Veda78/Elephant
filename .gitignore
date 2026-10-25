@@ -8,3 +8,6 @@ venv/
 # Python
 __pycache__/
 *.py[cod]
+
+# Elephant's persistent database
+elephant.db

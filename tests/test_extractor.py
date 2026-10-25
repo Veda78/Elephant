@@ -228,11 +228,36 @@ def test_drops_malformed_entries():
     print("  malformed entries dropped  OK")
 
 
+def test_prompt_tightening_present():
+    """Regression guard: the tightened promise/decision rules are in the prompt.
+
+    The mocked tests inject canned JSON, so they can't exercise the model's
+    judgment; this pins the instructions that produce it instead.
+    """
+    sp = extractor.SYSTEM_PROMPT
+    assert "SPEAKER commits THEMSELVES" in sp, "first-person promise rule"
+    assert "NOT promises" in sp, "non-promise examples"
+    assert "only confirming" in sp, "no duplicate on confirmation"
+    assert "SHORT and in plain lowercase" in sp, "short lowercase 'what'"
+    assert "introduced by the NEW message" in sp, "new-message-only scoping"
+    assert "NEVER extract an item from a recent message" in sp, "context-only rule"
+    assert "Saturday night on Mill Ave" in sp, "decision example"
+    assert "book the room Wednesday" in sp, "promise example"
+    print("  tightened promise/decision rules + examples present in prompt  OK")
+
+
 def test_live_api():
-    """Hits the real API. Skipped when ANTHROPIC_API_KEY is unset."""
+    """Hits the real API. Skipped when ANTHROPIC_API_KEY is unset.
+
+    Checks a real promise is caught, the "what" is short/lowercase, and the
+    tightened rules suppress non-promises (a question, a suggestion aimed at
+    someone else, and a bare confirmation of an existing plan).
+    """
     if not os.environ.get("ANTHROPIC_API_KEY"):
         print("  SKIPPED (ANTHROPIC_API_KEY not set)")
         return
+
+    # A genuine first-person promise with a time.
     got = extractor.extract(
         "I'll drop off the lab notebook at your dorm tomorrow at 5pm",
         "maya", NOW, [],
@@ -241,7 +266,23 @@ def test_live_api():
     assert all(i["kind"] in ("promise", "decision") for i in got), got
     assert all(i["due"] is None or isinstance(i["due"], int) for i in got), got
     assert any(i["kind"] == "promise" for i in got), f"expected a promise: {got}"
-    print(f"  live extract -> {got}")
+    promise = next(i for i in got if i["kind"] == "promise")
+    assert promise["what"] == promise["what"].lower(), \
+        f"'what' should be lowercase: {promise['what']!r}"
+    assert len(promise["what"]) <= 60, f"'what' too long: {promise['what']!r}"
+    print(f"  live promise -> {promise}")
+
+    # Non-promises: a question, a suggestion aimed at someone else, and a
+    # bare confirmation. None should yield a promise.
+    for text, author in [
+        ("can you send the slides tonight?", "maya"),        # question
+        ("you should book the study room for us", "deshawn"),  # aimed at others
+        ("sounds good, works for me", "priya"),              # confirmation
+    ]:
+        out = extractor.extract(text, author, NOW, [], )
+        assert not any(i["kind"] == "promise" for i in out), \
+            f"should not be a promise: {text!r} -> {out}"
+        print(f"  live non-promise {text!r:48} -> {out}")
 
 
 def main():
@@ -251,6 +292,7 @@ def main():
         ("malformed JSON is silent", test_bad_json_is_silent),
         ("fenced JSON tolerated", test_fenced_json_is_tolerated),
         ("malformed entries dropped", test_drops_malformed_entries),
+        ("prompt tightening present", test_prompt_tightening_present),
         ("live API call", test_live_api),
     ]
     for name, fn in tests:

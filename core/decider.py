@@ -10,6 +10,8 @@ Every decision carries a human-readable `reason`, because the demo surfaces why
 Elephant chose to stay quiet.
 """
 
+import datetime
+import json
 import os
 import re
 
@@ -119,22 +121,46 @@ def _complete(client, system, user, max_tokens=200):
 
 ANSWER_SYSTEM = """\
 You are Elephant, a warm, low-key group-chat helper. Using ONLY the context \
-provided (open items the group is tracking, and matching past messages), answer \
-the user's question in at most two short sentences. Be friendly and concise.
+provided (open items the group is tracking, and matching past messages), decide \
+whether you can answer the user's question.
 
-If the context does not actually contain the answer, reply with exactly NONE \
-(do not guess or make something up).\
+Respond with STRICT JSON only, one of:
+  {"answerable": false}
+  {"answerable": true, "reply": "<at most two short, friendly sentences>"}
+
+Answer only from the context. If the context does not actually contain the \
+answer, respond {"answerable": false} -- never guess or make something up. \
+Output ONLY the JSON object. No prose, no markdown fences.\
 """
 
 CONFLICT_SYSTEM = """\
 You check whether a new message conflicts with a decision the group already \
 made. You are given the open decisions and the new message.
 
-If the new message clearly contradicts one of the decisions (for example the \
-group decided Thursday at 6 and the message now says Thursday at 7), reply with \
-ONE short, friendly sentence pointing out the clash. Otherwise reply with \
-exactly NONE. Never invent a conflict; when in doubt, reply NONE.\
+A conflict means the new message changes the SAME event or SAME time slot as \
+one of the open decisions -- same plan, now at a different time or place (the \
+group decided Thursday at 6, the message now says Thursday at 7).
+
+A different plan, on a different day, or in a different place is NOT a \
+conflict. Adding a new, separate activity is NOT a conflict. For example, if \
+the open decision is "meet Thursday at 6 to study" and the message is "let's \
+go out Saturday night", that is a separate plan -- not a conflict.
+
+Respond with STRICT JSON only, one of:
+  {"conflict": false}
+  {"conflict": true, "line": "<ONE short, friendly sentence pointing out the clash>"}
+
+Never invent a conflict; when in doubt, respond {"conflict": false}. Output \
+ONLY the JSON object. No prose, no markdown fences.\
 """
+
+
+def _due_label(due):
+    """Render a stored epoch `due` as a readable local time for the model."""
+    if not due:
+        return ""
+    dt = datetime.datetime.fromtimestamp(due, extractor.PHOENIX)
+    return " (due " + dt.strftime("%A %-I:%M%p").lower() + ")"
 
 
 def _format_context(open_items, hits):
@@ -142,8 +168,8 @@ def _format_context(open_items, hits):
     if open_items:
         lines.append("Open items the group is tracking:")
         for it in open_items:
-            due = f" (due {it['due']})" if it.get("due") else ""
-            lines.append(f"  - [{it['kind']}] {it['who']}: {it['what']}{due}")
+            lines.append(f"  - [{it['kind']}] {it['who']}: "
+                         f"{it['what']}{_due_label(it.get('due'))}")
     if hits:
         lines.append("Matching past messages:")
         for m in hits:
@@ -164,19 +190,46 @@ def _gather_context(message_text, memory, channel):
     return open_items, hits[:5]
 
 
+def _parse_json_object(raw_text):
+    """Parse a strict-JSON object reply, tolerating a stray fence. None on fail."""
+    if not raw_text:
+        return None
+    text = raw_text.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if text.lower().startswith("json"):
+            text = text[4:]
+        text = text.strip()
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
 def _answer_from_memory(message_text, memory, channel, client):
-    """Compose a reply from memory, or None if memory can't answer."""
+    """Compose a reply from memory, or None if memory can't answer.
+
+    The model returns strict JSON: {"answerable": false} or
+    {"answerable": true, "reply": "..."}. Parsing failures stay quiet.
+    """
     open_items, hits = _gather_context(message_text, memory, channel)
     context = _format_context(open_items, hits)
     user = f"{context}\n\nQuestion from the chat:\n  {message_text}"
-    reply = _complete(client, ANSWER_SYSTEM, user)
-    if not reply or reply.strip().upper().startswith("NONE"):
+    data = _parse_json_object(_complete(client, ANSWER_SYSTEM, user))
+    if not data or data.get("answerable") is not True:
         return None
-    return reply
+    reply = data.get("reply")
+    return reply if isinstance(reply, str) and reply.strip() else None
 
 
 def _detect_conflict(message_text, memory, channel, client):
-    """Return a one-line conflict callout, or None."""
+    """Return a one-line conflict callout, or None.
+
+    The model returns strict JSON: {"conflict": false} or
+    {"conflict": true, "line": "..."}. Prose, or any parse failure, stays
+    quiet -- Elephant speaks only when conflict is true with a usable line.
+    """
     decisions = [it for it in memory.get_open_items(channel)
                  if it["kind"] == "decision"]
     # Cheap pre-filter: no standing decisions, or nothing time-like to clash.
@@ -184,13 +237,13 @@ def _detect_conflict(message_text, memory, channel, client):
         return None
     lines = ["Open decisions:"]
     for it in decisions:
-        due = f" (due {it['due']})" if it.get("due") else ""
-        lines.append(f"  - {it['who']}: {it['what']}{due}")
+        lines.append(f"  - {it['who']}: {it['what']}{_due_label(it.get('due'))}")
     user = "\n".join(lines) + f"\n\nNew message:\n  {message_text}"
-    reply = _complete(client, CONFLICT_SYSTEM, user)
-    if not reply or reply.strip().upper().startswith("NONE"):
+    data = _parse_json_object(_complete(client, CONFLICT_SYSTEM, user))
+    if not data or data.get("conflict") is not True:
         return None
-    return reply
+    line = data.get("line")
+    return line if isinstance(line, str) and line.strip() else None
 
 
 # ---------------------------------------------------------------------------

@@ -17,7 +17,10 @@ def format_stats(memory, channel):
     seen, replied = counts["seen"], counts["replied"]
     score = memory.get_silence_score()
     kinds = memory.count_reply_kinds(channel)
-    decisions = memory.get_decisions(channel, limit=5)
+    # The recent-decisions list is about message-driven decisions; follow-ups
+    # are proactive and get their own counter below, so exclude them here.
+    decisions = [d for d in memory.get_decisions(channel, limit=50)
+                 if d["kind"] != "followup"][:5]
 
     breakdown = ", ".join(f"{k} {kinds.get(k, 0)}" for k in _REPLY_KINDS)
 
