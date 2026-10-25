@@ -205,9 +205,19 @@ def decide(message_text, author, now, memory, mentioned, *,
     """Decide whether Elephant should speak about one incoming message.
 
     Returns a dict: speak (bool), reason (str), kind ("answer"/"followup"/
-    "conflict"/"none"), reply (str or None). Records the message as seen, and
-    records a reply whenever Elephant speaks.
+    "conflict"/"none"), reply (str or None). Records the message as seen,
+    records a reply whenever Elephant speaks, and logs the decision (spoke or
+    not) to the decision log.
     """
+    res = _decide(message_text, author, now, memory, mentioned,
+                  channel=channel, client=client)
+    memory.log_decision(channel, message_text, res["speak"], res["kind"],
+                        res["reason"])
+    return res
+
+
+def _decide(message_text, author, now, memory, mentioned, *,
+            channel=DEFAULT_CHANNEL, client=None):
     memory.record_seen()
     text_lower = message_text.lower()
 
@@ -250,9 +260,12 @@ def check_due(memory, now, *, channel=DEFAULT_CHANNEL):
 
     One short line per overdue promise. Marks nothing done. Respects the same
     unprompted cooldown as conflicts; returns [] when on cooldown or nothing is
-    due. This does not touch the seen/replied stats: follow-ups are proactive,
-    not responses to a message that was "seen", so counting them would distort
-    the silence score.
+    due.
+
+    Each follow-up is logged to the decision log with kind "followup", but
+    record_seen/record_reply are deliberately NOT called: follow-ups are
+    proactive, not responses to a message that was "seen", so counting them
+    would distort the silence score.
     """
     due = memory.get_due_items(now)
     if not due:
@@ -260,7 +273,10 @@ def check_due(memory, now, *, channel=DEFAULT_CHANNEL):
     if not _cooldown_ok(channel, now):
         return []
     _register_unprompted(channel, now)
-    return [
-        f"hey {it['who']}, did you get a chance to {it['what']}? no rush!"
-        for it in due
-    ]
+    lines = []
+    for it in due:
+        line = f"hey {it['who']}, did you get a chance to {it['what']}? no rush!"
+        memory.log_decision(channel, line, True, "followup",
+                            "promise past due")
+        lines.append(line)
+    return lines

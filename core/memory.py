@@ -49,6 +49,16 @@ class MemoryStore:
             );
 
             INSERT OR IGNORE INTO stats (id, seen, replied) VALUES (1, 0, 0);
+
+            CREATE TABLE IF NOT EXISTS decisions (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                channel      TEXT NOT NULL,
+                message_text TEXT NOT NULL,
+                speak        INTEGER NOT NULL,
+                kind         TEXT NOT NULL,
+                reason       TEXT NOT NULL,
+                timestamp    REAL NOT NULL
+            );
             """
         )
         self.conn.commit()
@@ -136,6 +146,46 @@ class MemoryStore:
         if not row or row["seen"] == 0:
             return 0.0
         return (row["seen"] - row["replied"]) / row["seen"] * 100
+
+    def get_seen_replied(self):
+        """Return raw counts as a dict: {"seen": N, "replied": M}."""
+        row = self.conn.execute(
+            "SELECT seen, replied FROM stats WHERE id = 1"
+        ).fetchone()
+        if not row:
+            return {"seen": 0, "replied": 0}
+        return {"seen": row["seen"], "replied": row["replied"]}
+
+    # -- decision log -----------------------------------------------------
+
+    def log_decision(self, channel, message_text, speak, kind, reason):
+        """Record one decide() outcome. message_text is truncated to 120 chars."""
+        cur = self.conn.execute(
+            "INSERT INTO decisions (channel, message_text, speak, kind, reason, "
+            "timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+            (channel, message_text[:120], 1 if speak else 0, kind, reason,
+             time.time()),
+        )
+        self.conn.commit()
+        return cur.lastrowid
+
+    def get_decisions(self, channel, limit=5):
+        """Return the most recent decisions in a channel, newest first."""
+        rows = self.conn.execute(
+            "SELECT * FROM decisions WHERE channel = ? "
+            "ORDER BY id DESC LIMIT ?",
+            (channel, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def count_reply_kinds(self, channel):
+        """Count spoken decisions by kind: {"answer": N, "conflict": M, ...}."""
+        rows = self.conn.execute(
+            "SELECT kind, COUNT(*) AS n FROM decisions "
+            "WHERE channel = ? AND speak = 1 GROUP BY kind",
+            (channel,),
+        ).fetchall()
+        return {row["kind"]: row["n"] for row in rows}
 
     def close(self):
         self.conn.close()
